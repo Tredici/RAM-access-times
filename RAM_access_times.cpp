@@ -229,7 +229,19 @@ int main(int argc, char* argv[]) {
     parsed_args args = parsed_args::parse(argc, argv);
 
     // Set a locale that uses thousands separators (e.g., US English)
-    std::locale::global(std::locale("en_US.UTF-8"));
+    std::string preferred_locale = "en_US.UTF-8";
+    try
+    {
+        std::cout << "Try setting locale to " << preferred_locale << std::endl;
+        std::locale::global(std::locale(preferred_locale));
+        std::cout << "Locale set!" << std::endl;
+    }
+    catch(const std::exception& e)
+    {
+        std::cerr << "Error setting locale to " << preferred_locale << "\n\treason: " << e.what() << '\n';
+        std::cerr << "Using default locale\n";
+    }
+    
 
 
     std::cout << "Enable Unix memory locking" << std::endl;
