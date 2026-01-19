@@ -255,7 +255,7 @@ int main(int argc, char* argv[]) {
         // lower is half the upper
         auto lower = upper >> 1;
         //std::cout << '[' << std::setw(10) << lower << ", " << std::setw(10) << upper << ")\t" << std::setw(10) << test_times[idx] << std::endl;
-        std::cout << '[' << std::setw(10) << lower << ", " << std::setw(10) << upper << ")\t" << std::setw(10) << std::format("{:L}", test_times[idx]) << std::endl;
+        std::cout << '[' << std::setw(10) << lower << ", " << std::setw(10) << upper << ")\t" << std::setw(12) << std::format("{:L}", test_times[idx]) << std::endl;
     }
 
     return 0;
