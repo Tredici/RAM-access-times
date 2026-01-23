@@ -1,3 +1,4 @@
+
 #include <bit>
 #include <chrono>
 #include <cstdlib>
@@ -261,14 +262,27 @@ int main(int argc, char* argv[]) {
     
 
 
-    std::cout << "Enable Unix memory locking" << std::endl;
-
-    if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
-        std::cerr << "Warning: Failed to lock memory: " << std::strerror(errno) << std::endl; // Non-fatal (MacOS)
-        // Handle error (e.g., exit or throw exception)
-    }
+    std::cout << "Enable memory locking" << std::endl;
 
     std::unique_ptr<datatype[]> test_memory = allocate_array(args.array_sz);
+
+#ifdef __linux__
+
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+        std::cerr << "Warning: Failed to lock memory: "
+                  << std::strerror(errno) << std::endl;
+    }
+
+#elif defined(__APPLE__)
+
+    size_t bytes = args.array_sz * sizeof(datatype);
+    if (mlock(test_memory.get(), bytes) != 0) {
+        std::cerr << "Warning: Failed to lock memory: "
+                  << std::strerror(errno) << std::endl;
+    }
+
+#endif
+
 
     // run all operation
     auto test_times = operate(args.array_sz, test_memory, args.operation_count);
@@ -279,6 +293,7 @@ int main(int argc, char* argv[]) {
     // print result
     for (auto idx : std::views::iota((decltype(test_times.size()))0, test_times.size()))
     {
+        if (test_times[idx] == 0) continue; // skip empty
         // upper is given by integer
         auto upper = 1ULL << idx;
         // lower is half the upper
