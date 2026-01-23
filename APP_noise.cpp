@@ -205,7 +205,7 @@ int main(int argc, char* argv[]) {
     // print result
     for (auto idx : std::views::iota((decltype(test_times.size()))0, test_times.size()))
     {
-        if (test_times[idx] == 0) continue; // [MOD] skip empty
+        if (test_times[idx] == 0) continue; // skip empty
         // upper is given by integer
         auto upper = 1ULL << idx;
         // lower is half the upper
