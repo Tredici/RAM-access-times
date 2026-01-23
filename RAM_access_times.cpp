@@ -14,12 +14,25 @@
 #include <string>    // For std::stoi
 #include <thread>
 #include <vector>
+#include <numeric>
+#include <algorithm>
 
 #include <stdlib.h>
 #include <unistd.h>
 
 
 #include <sys/mman.h>
+
+// Hardware counter
+inline uint64_t get_cycles() {
+#if defined(__aarch64__)
+    uint64_t val; asm volatile("mrs %0, cntvct_el0" : "=r"(val)); return val;
+#elif defined(__x86_64__) || defined(_M_X64)
+    unsigned int lo, hi; asm volatile ("rdtscp" : "=a" (lo), "=d" (hi) :: "rcx"); return ((uint64_t)hi << 32) | lo;
+#else
+    return 0;
+#endif
+}
 
 using datatype = unsigned long long;
 using datatype_safearrptr = std::unique_ptr<datatype[]>;
@@ -108,9 +121,15 @@ datatype_safearrptr allocate_array(std::size_t N)
         std::cout << "Time elapsed: " << std::format("{:L}", elapsed.count()) << " ns" << std::endl;
     }
     {   // allocating array
-        std::cout << "Zero-ing the array..." << std::endl;
+        std::cout << "Initializing Pointer Chasing pattern..." << std::endl;
         auto start = std::chrono::steady_clock::now();
-        memset(ans.get(), 0, N * datatype_sz);
+        // Pointer chasing init instead of memset
+        std::vector<datatype> indices(N);
+        std::iota(indices.begin(), indices.end(), 0);
+        std::shuffle(indices.begin(), indices.end(), std::mt19937{std::random_device{}()});
+        auto ptr = ans.get();
+        for(size_t i=0; i<N-1; ++i) ptr[indices[i]] = indices[i+1];
+        ptr[indices[N-1]] = indices[0];
         auto end = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
         std::cout << "Time elapsed: " << std::format("{:L}", elapsed.count()) << " ns" << std::endl;
@@ -123,20 +142,21 @@ datatype_safearrptr allocate_array(std::size_t N)
 
 
 // results will be 
-constexpr std::size_t result_grous = 32;
+constexpr std::size_t result_groups = 64; // Increased from 32
 
-std::chrono::nanoseconds test_time_sampling_overhead()
+// Return uint64_t
+uint64_t test_time_sampling_overhead()
 {
-    auto start = std::chrono::steady_clock::now();
+    auto start = get_cycles();
     std::atomic_thread_fence(std::memory_order_acquire); 
     std::atomic_thread_fence(std::memory_order_release);
-    auto end = std::chrono::steady_clock::now();
+    auto end = get_cycles();
 
-    auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-    return elapsed;
+    return end - start;
 }
 
-std::chrono::nanoseconds estimate_time_sampling_overhead(std::size_t reps = 1024)
+// Return uint64_t
+uint64_t estimate_time_sampling_overhead(std::size_t reps = 1024)
 {
     if (!reps)
     {
@@ -157,38 +177,32 @@ std::vector<std::size_t> operate(std::size_t N, datatype_safearrptr& safe_ptr, s
     auto ptr = safe_ptr.get();
 
     auto estimated_timing_bias = estimate_time_sampling_overhead();
-    std::cout << "Estimated time sampling overhead of: " << std::format("{:L}", estimated_timing_bias.count()) << " ns" << std::endl;
+    std::cout << "Estimated time sampling overhead of: " << std::format("{:L}", estimated_timing_bias) << " cycles" << std::endl;
 
-    std::vector<std::size_t> log2time_counter(result_grous);
+    std::vector<std::size_t> log2time_counter(result_groups);
 
-    // to generate sparse random numbers rely on Mersenne Twister engine
-    std::random_device rd;
-    // initialize engine
-    std::mt19937 gen(rd());
-    // avoid %N issue
-    std::uniform_int_distribution<> distr(0, N-1);
+    // Removed random gen from here, added current_idx
+    datatype current_idx = 0; 
 
     auto test_start = std::chrono::steady_clock::now();
 
     for (decltype(ops2perform) i{}; i != ops2perform; ++i)
     {
-        // get index of array item to modify
-        auto idx2modify = distr(gen);
+        // removed random generation
 
-        auto start = std::chrono::steady_clock::now();
+        auto start = get_cycles();
 
         // prevent reordering
         std::atomic_thread_fence(std::memory_order_acquire); 
         {
-            // perform update operation on memory - just to trigger
-            // memory (either cache or RAM) accesses
-            ++ptr[idx2modify];
+            // Pointer Chasing: read value to find next index
+            current_idx = ptr[current_idx];
         }
         // ensure operation has been completed
         std::atomic_thread_fence(std::memory_order_release);
 
-        auto end = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+        auto end = get_cycles();
+        auto elapsed = end - start;
 
         if (elapsed >= estimated_timing_bias)
         {
@@ -201,9 +215,9 @@ std::vector<std::size_t> operate(std::size_t N, datatype_safearrptr& safe_ptr, s
             elapsed -= elapsed;
         }
 
-        auto val = elapsed.count();
+        auto val = elapsed;
         // should never overflow - otherwise measures are broken
-        auto log2time_idx_floor = std::bit_width((unsigned)val);
+        auto log2time_idx_floor = std::bit_width((unsigned long long)val); // Cast
         // counter unexpected overflow
         if (std::size_t(log2time_idx_floor) >= std::size_t(log2time_counter.size()))
         {
@@ -219,6 +233,9 @@ std::vector<std::size_t> operate(std::size_t N, datatype_safearrptr& safe_ptr, s
     auto test_end = std::chrono::steady_clock::now();
     auto test_elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(test_end - test_start);
     std::cout << "Time elapsed for whole test: " << std::format("{:L}", test_elapsed.count()) << " ns" << std::endl;
+
+    // Prevent dead code elimination
+    asm volatile("" : : "r"(current_idx) : "memory");
 
     return log2time_counter;
 }
@@ -247,7 +264,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Enable Unix memory locking" << std::endl;
 
     if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
-        std::cerr << "Failed to lock memory: " << std::strerror(errno) << std::endl;
+        std::cerr << "Warning: Failed to lock memory: " << std::strerror(errno) << std::endl; // Non-fatal (MacOS)
         // Handle error (e.g., exit or throw exception)
     }
 
@@ -256,8 +273,8 @@ int main(int argc, char* argv[]) {
     // run all operation
     auto test_times = operate(args.array_sz, test_memory, args.operation_count);
 
-    std::cout << "Print memory access time distribution" << std::endl;
-    std::cout << "Interval are [a, b), with nanosecond accuracy and logarithmic scaled-bins" << std::endl;
+    std::cout << "Print memory access time distribution (Cycles)" << std::endl;
+    std::cout << "Interval are [a, b), with cycle accuracy and logarithmic scaled-bins" << std::endl;
 
     // print result
     for (auto idx : std::views::iota((decltype(test_times.size()))0, test_times.size()))
@@ -272,5 +289,3 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
-
-
