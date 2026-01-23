@@ -21,6 +21,17 @@
 
 #include <sys/mman.h>
 
+// [NEW] Hardware counter helper
+inline uint64_t get_cycles() {
+#if defined(__aarch64__)
+    uint64_t val; asm volatile("mrs %0, cntvct_el0" : "=r"(val)); return val;
+#elif defined(__x86_64__) || defined(_M_X64)
+    unsigned int lo, hi; asm volatile ("rdtscp" : "=a" (lo), "=d" (hi) :: "rcx"); return ((uint64_t)hi << 32) | lo;
+#else
+    return 0;
+#endif
+}
+
 using datatype = unsigned long long;
 using datatype_safearrptr = std::unique_ptr<datatype[]>;
 constexpr std::size_t datatype_sz = sizeof(datatype);
@@ -85,21 +96,22 @@ struct parsed_args
 
 
 // results will be 
-constexpr std::size_t result_grous = 32;
+constexpr std::size_t result_grous = 64; // Increased to 64 for cycle count safety
 
-std::chrono::nanoseconds test_time_sampling_overhead()
+// Return uint64_t instead of chrono
+uint64_t test_time_sampling_overhead()
 {
-    auto start = std::chrono::steady_clock::now();
+    auto start = get_cycles(); // use hardware counter
     // no barriers this time
     //std::atomic_thread_fence(std::memory_order_acquire); 
     //std::atomic_thread_fence(std::memory_order_release);
-    auto end = std::chrono::steady_clock::now();
+    auto end = get_cycles();   // use hardware counter
 
-    auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-    return elapsed;
+    return end - start;
 }
 
-std::chrono::nanoseconds estimate_time_sampling_overhead(std::size_t reps = 1024)
+// [MOD] Return uint64_t
+uint64_t estimate_time_sampling_overhead(std::size_t reps = 1024)
 {
     if (!reps)
     {
@@ -118,7 +130,7 @@ std::chrono::nanoseconds estimate_time_sampling_overhead(std::size_t reps = 1024
 std::vector<std::size_t> operate(std::size_t ops2perform)
 {
     auto estimated_timing_bias = estimate_time_sampling_overhead();
-    std::cout << "Estimated time sampling overhead of: " << std::format("{:L}", estimated_timing_bias.count()) << " ns" << std::endl;
+    std::cout << "Estimated time sampling overhead of: " << std::format("{:L}", estimated_timing_bias) << " cycles" << std::endl;
 
     std::vector<std::size_t> log2time_counter(result_grous);
 
@@ -128,15 +140,15 @@ std::vector<std::size_t> operate(std::size_t ops2perform)
     for (decltype(ops2perform) i{}; i != ops2perform; ++i)
     {
 
-        auto start = std::chrono::steady_clock::now();
+        auto start = get_cycles(); // [MOD]
         // try to measure just time between consecutive OPs
         // all should be accelerated by the cache
-        auto end = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+        auto end = get_cycles();   // [MOD]
+        auto elapsed = end - start; // [MOD]
 
-        auto val = elapsed.count();
+        auto val = elapsed;
         // should never overflow - otherwise measures are broken
-        auto log2time_idx_floor = std::bit_width((unsigned)val);
+        auto log2time_idx_floor = std::bit_width((unsigned long long)val); // [MOD] safe cast
         // counter unexpected overflow
         if (std::size_t(log2time_idx_floor) >= std::size_t(log2time_counter.size()))
         {
@@ -180,19 +192,20 @@ int main(int argc, char* argv[]) {
     std::cout << "Enable Unix memory locking" << std::endl;
 
     if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
-        std::cerr << "Failed to lock memory: " << std::strerror(errno) << std::endl;
+        std::cerr << "Warning: Failed to lock memory (macOS?): " << std::strerror(errno) << std::endl; // [MOD] Non-fatal
         // Handle error (e.g., exit or throw exception)
     }
 
     // run all operation
     auto test_times = operate(args.operation_count);
 
-    std::cout << "Print operation time distribution" << std::endl;
-    std::cout << "Interval are [a, b), with nanosecond accuracy and logarithmic scaled-bins" << std::endl;
+    std::cout << "Print operation time distribution (Cycles)" << std::endl;
+    std::cout << "Interval are [a, b), with cycle accuracy and logarithmic scaled-bins" << std::endl;
 
     // print result
     for (auto idx : std::views::iota((decltype(test_times.size()))0, test_times.size()))
     {
+        if (test_times[idx] == 0) continue; // skip empty
         // upper is given by integer
         auto upper = 1ULL << idx;
         // lower is half the upper
@@ -203,5 +216,3 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
-
-
